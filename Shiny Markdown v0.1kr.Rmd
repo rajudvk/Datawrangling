@@ -1,0 +1,304 @@
+---
+title: "Shiny Project"
+output: html_document
+---
+
+### Loading libraries
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+library(riingo)
+library(tidyquant)
+library(PerformanceAnalytics)
+library(highcharter)
+library(shiny)
+library(lubridate)
+library(tidyverse)
+library(shinythemes)
+library(tibbletime)
+```
+
+* **Riingo is the package build to interact with the Tiingo API, to pull daily crypto data.**
+* **PerformanceAnalytics, highcharter and tidyquant are packages specifically towards Financial data analysis. Tidy quant package is developed employing tidy princples **
+
+### Scraping data from Tiingo API
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+tiingo_api_key('eaff4a7b5ef40d77fe14a1538b429246e728e062')
+tickers = supported_tickers(type = "crypto")
+
+coins = c("btcusd","dogeusd","ethusd","xrpusd","ltcusd")
+chk = tq_get(coins,get = "tiingo.crypto",from = "2018-01-01",to = "2021-04-20",resample_frequency = "1day")
+table(chk$symbol)
+
+prices = chk
+prices$date = ymd(prices$date)
+```
+
+* **Tickers table gives a list of all the cryto currencies supported by Tiingo API, in addition to crypto data, Tiingo is also used to pull in data for stocks and other financial instruments** 
+
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+ui = fluidPage(theme=shinytheme("darkly"),
+               
+               titlePanel("Crypto Currency Strategy Analysis Dashboard"),
+               
+               sidebarLayout(
+                 
+                 sidebarPanel(numericInput(inputId = "invest", label ="Investment", value = 1000),
+                              dateRangeInput(inputId = "date", label = "Time Range", 
+                                             start = "2019-01-01", end ="2021-04-20", 
+                                             min = "2019-01-01", max ="2021-04-20",
+                                             format = "yyyy-mm-dd"),
+                              selectInput("coin", label = "Select Crypto", choices = list("Bitcoin" = "btcusd", "Doge coin" = "dogeusd", "Ethereum" = "ethusd","Ripple"="xrpusd","Lite Coin"="ltcusd"), selected = "btcusd"),
+                              selectInput("week", label = "Select DA freq(week(s))", choices = list("Weekly" = 1, "Bi Weekly" = 2, "Once in 3 Weeks" = 3,"Once in 4 Weeks" = 4), selected = 1)
+                 ), 
+                 
+                 mainPanel(highchartOutput("trend"),highchartOutput("profit")
+                 )
+               )
+)
+```
+
+* **Themes can be applied to shiny dashboards through shinythemes package**
+* **Followed a side panel, main panel layout for the UI**
+* **Dashboard takes in 4 inputs, and produces 2 outputs**
+* **The min and max dates can be specified on the input date ranges**
+* **The motivation is to create interactive plots. The package highcharter in pulling Javascript styled into R. To render these graphs, highchartOutput is used instead of the standard plotOutput**
+* ****
+
+
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+
+# As in the case with the Plothighchart, renderHighchart is also used specifically to render interactive charts onto Shiny dashboard
+server <- function(input, output, session) {
+  
+  output$trend =   renderHighchart({
+    
+    prices = chk %>% filter(date>=input$date[1]&date<=input$date[2]&symbol==input$coin)
+# DA is a strategy wherein equal investments are made in a timely manner, once in a week, 2 weeks.. instead of decreasing the volatility (variance) of the investment
+    
+# All the 3 inputs go into the below 3 variables 
+    invest = input$invest
+    freq = as.numeric(input$week)
+    denom = 400
+# Strategy 1 - Dollar Averaging
+# Below we are creating a money invested column. It is tricky with the mutate function. Instead iterated over a vector with the custom rules to come up with the money invested column
+    vec=c()
+    dum =input$invest
+    i = 1
+    while(dum != 0){
+      if(dum>denom){
+        vec = c(vec,rep(denom*i,freq*7))
+        dum = dum-denom
+        i =i+1
+      }
+      else{
+        vec = c(vec, rep(invest,(nrow(prices)-length(vec))))
+        dum =0
+      }
+    }
+    
+    
+    prices$money_inv_da = vec
+    prices = as.data.frame(prices)
+    
+    
+    coin_vec =c()
+    i =1
+    for (i in seq(nrow(prices))){
+      if(i==1){
+        coin_vec = c(coin_vec,prices$money_inv_da[1]/prices$open[1])
+      }
+      else if(prices$money_inv_da[i]==prices$money_inv_da[i-1]){
+        coin_vec = c(coin_vec,coin_vec[i-1])
+      }else{
+        coin_vec = c(coin_vec,(prices$money_inv_da[i]-prices$money_inv_da[i-1])/prices$open[i] + coin_vec[i-1])
+      }
+      
+    }
+    
+    prices$coin_inv_da = coin_vec
+    
+    prices$portfolio_da = prices$coin_inv_da*prices$open
+    
+#Strategy 2 - Golden cross, death cross method 
+#Whenever 50 day (shorter trend) MA goes over the 200 day (longer trend) MA , it is a signal for bullish market and is a signal to buy and viceversa is a signal for a bullish trend and sell 
+    
+    roll_mean_50 = rollify(mean,window = 50)
+    roll_mean_200 = rollify(mean,window = 200)
+#Rollify is a function which creates functions across the number of rows specified in the window
+        
+    prices_ma = chk%>% mutate(ma_50 = roll_mean_50(open), ma_200 = roll_mean_200(open)) %>% 
+      mutate("signal" = ifelse(ma_50>ma_200,1,0)) %>% 
+      filter(date>=input$date[1]&date<=input$date[2]&symbol==input$coin)
+# Creating a signal     
+    
+    money_poc_ma =c()
+    money_inv_ma =c()
+    coin_inv_ma =c()
+
+# Money in pocket column is a important column in computing this algorithm
+# There can be 3 use cases in total, buy, sell and continue with the either once 
+    i=1
+    
+    for (i in seq(nrow(prices_ma))){
+      if(i==1){
+        if (prices_ma$signal[1]==0){
+          money_poc_ma[1] = invest
+          money_inv_ma[1] = 0
+          coin_inv_ma[1]=0
+        }else{
+          money_poc_ma[1] = 0
+          money_inv_ma[1] = invest
+          coin_inv_ma[1]=invest/prices_ma$open[1]}
+      }else{
+        if(prices_ma$signal[i]==prices_ma$signal[i-1]){
+          money_poc_ma[i] = money_poc_ma[i-1] 
+          money_inv_ma[i] = money_inv_ma[i-1]
+          coin_inv_ma[i] = coin_inv_ma[i-1]
+        }else if(prices_ma$signal[i]==0&prices_ma$signal[i-1]==1){
+          money_poc_ma[i] = coin_inv_ma[i-1]*prices_ma$open[i]
+          money_inv_ma[i] = 0
+          coin_inv_ma[i]=0
+        }else if(prices_ma$signal[i]==1&prices_ma$signal[i-1]==0){
+          money_poc_ma[i] = 0
+          money_inv_ma[i] = money_poc_ma[i-1]
+          coin_inv_ma[i]=money_poc_ma[i-1]/prices_ma$open[i]
+        }
+      }
+    }
+    
+    prices_ma$money_poc_ma = money_poc_ma
+    prices_ma$money_inv_ma =money_inv_ma
+    prices_ma$coin_inv_ma =coin_inv_ma
+    
+    # Portfolio amount at any time is equal to the money in pocket + money in investment 
+    prices_ma$portfolio_ma = prices_ma$money_poc_ma+prices_ma$coin_inv_ma*prices_ma$open
+    
+    prices$portfolio_ma = prices_ma$portfolio_ma
+    
+    prices_pivot = prices %>% select(date,portfolio_da, portfolio_ma) %>%  pivot_longer(cols = 2:3,names_to = "Strategy")
+    prices_pivot$Strategy[prices_pivot$Strategy=="portfolio_da"] ="Dollar Averaging"
+    prices_pivot$Strategy[prices_pivot$Strategy=="portfolio_ma"] ="Golden Cross/ Death Cross"
+    
+    hchart(prices_pivot,hcaes(x=ymd(date),y=round(value,1), group ="Strategy"), type ="line") %>% hc_exporting(enabled =TRUE) %>% 
+      hc_tooltip(crosshairs = TRUE, backgroundColor = "#FCFFC5",shared = TRUE, borderWidth = 2) %>%
+      hc_title(text="Portfolio value graph",align="center") %>%
+      hc_subtitle(text="Data Source: Tingo API",align="right") %>%
+      hc_add_theme(hc_theme_elementary()) %>% 
+      hc_xAxis(title = list(text = "Date")) %>% 
+      hc_yAxis(title = list(text = "Portfolio Value"))}
+  )
+  output$profit =   renderHighchart({
+    
+    prices = chk %>% filter(date>=input$date[1]&date<=input$date[2]&symbol==input$coin)
+    
+    invest = input$invest
+    freq = as.numeric(input$week)
+    denom = 400
+    
+    vec=c()
+    dum =input$invest
+    i = 1
+    while(dum != 0){
+      if(dum>denom){
+        vec = c(vec,rep(denom*i,freq*7))
+        dum = dum-denom
+        i =i+1
+      }
+      else{
+        vec = c(vec, rep(invest,(nrow(prices)-length(vec))))
+        dum =0
+      }
+    }
+    
+    
+    prices$money_inv_da = vec
+    prices = as.data.frame(prices)
+    
+    
+    coin_vec =c()
+    i =1
+    for (i in seq(nrow(prices))){
+      if(i==1){
+        coin_vec = c(coin_vec,prices$money_inv_da[1]/prices$open[1])
+      }
+      else if(prices$money_inv_da[i]==prices$money_inv_da[i-1]){
+        coin_vec = c(coin_vec,coin_vec[i-1])
+      }else{
+        coin_vec = c(coin_vec,(prices$money_inv_da[i]-prices$money_inv_da[i-1])/prices$open[i] + coin_vec[i-1])
+      }
+      
+    }
+    
+    prices$coin_inv_da = coin_vec
+    
+    prices$portfolio_da = prices$coin_inv_da*prices$open
+    
+    ### Golden cross, death cross method 
+    
+    roll_mean_50 = rollify(mean,window = 50)
+    roll_mean_200 = rollify(mean,window = 200)
+    
+    prices_ma = chk%>% mutate(ma_50 = roll_mean_50(open), ma_200 = roll_mean_200(open)) %>% 
+      mutate("signal" = ifelse(ma_50>ma_200,1,0)) %>% 
+      filter(date>=input$date[1]&date<=input$date[2]&symbol==input$coin)
+    
+    money_poc_ma =c()
+    money_inv_ma =c()
+    coin_inv_ma =c()
+    
+    i=1
+    
+    for (i in seq(nrow(prices_ma))){
+      if(i==1){
+        if (prices_ma$signal[1]==0){
+          money_poc_ma[1] = invest
+          money_inv_ma[1] = 0
+          coin_inv_ma[1]=0
+        }else{
+          money_poc_ma[1] = 0
+          money_inv_ma[1] = invest
+          coin_inv_ma[1]=invest/prices_ma$open[1]}
+      }else{
+        if(prices_ma$signal[i]==prices_ma$signal[i-1]){
+          money_poc_ma[i] = money_poc_ma[i-1] 
+          money_inv_ma[i] = money_inv_ma[i-1]
+          coin_inv_ma[i] = coin_inv_ma[i-1]
+        }else if(prices_ma$signal[i]==0&prices_ma$signal[i-1]==1){
+          money_poc_ma[i] = coin_inv_ma[i-1]*prices_ma$open[i]
+          money_inv_ma[i] = 0
+          coin_inv_ma[i]=0
+        }else if(prices_ma$signal[i]==1&prices_ma$signal[i-1]==0){
+          money_poc_ma[i] = 0
+          money_inv_ma[i] = money_poc_ma[i-1]
+          coin_inv_ma[i]=money_poc_ma[i-1]/prices_ma$open[i]
+        }
+      }
+    }
+    
+    prices_ma$money_poc_ma = money_poc_ma
+    prices_ma$money_inv_ma =money_inv_ma
+    prices_ma$coin_inv_ma =coin_inv_ma
+    
+    prices_ma$portfolio_ma = prices_ma$money_poc_ma+prices_ma$coin_inv_ma*prices_ma$open
+    
+    prices$portfolio_ma = prices_ma$portfolio_ma
+    prices = prices %>% mutate("profit_da"= prices$portfolio_da-prices$money_inv_da,"profit_ma"=portfolio_ma-input$invest) %>% 
+      select(date,profit_da,profit_ma)
+    
+    prices_pivot = prices %>% select(date,profit_da, profit_ma) %>%  pivot_longer(cols = 2:3,names_to = "Strategy")
+    prices_pivot$Strategy[prices_pivot$Strategy=="profit_da"] ="Dollar Averaging"
+    prices_pivot$Strategy[prices_pivot$Strategy=="profit_ma"] ="Golden Cross/ Death Cross"
+    
+    hchart(prices_pivot,hcaes(x=ymd(date),y=round(value,1), group ="Strategy"), type ="line") %>% hc_exporting(enabled =TRUE) %>% 
+      hc_tooltip(crosshairs = TRUE, backgroundColor = "#FCFFC5",shared = TRUE, borderWidth = 2) %>%
+      hc_title(text="Net profit/loss graph",align="center") %>%
+      hc_subtitle(text="Data Source: Tingo API",align="right") %>%
+      hc_add_theme(hc_theme_elementary()) %>% 
+      hc_xAxis(title = list(text = "Date")) %>% 
+      hc_yAxis(title = list(text = "Net gains"))})  
+}
+
+```
+
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+shinyApp(ui = ui, server = server)
+```
